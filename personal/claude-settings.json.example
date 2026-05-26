@@ -1,0 +1,27 @@
+{
+  "_comment": "Example Claude Code settings.json snippet for MemPalace hooks. Merge into your ~/.claude/settings.json — do NOT overwrite it.",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/mempalace-mine-hook.sh",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/.claude/mempalace-precompact-hook.sh",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}
