@@ -26,7 +26,7 @@ vanilla mempalace 在实际用起来有三个盲区：
 `hooks/mempalace-mine-hook.sh` 的关键设计点：
 
 - **不阻塞会话关闭** —— 钩子立即返回，所有 mine 工作放进 `nohup` 后台子 shell。
-- **全局 flock 排队** —— 多个项目、多个会话可能同时触发 SessionEnd。mempalace 在 palace 级别强制单写者（`mine_palace_<key>.lock`，非阻塞 `LOCK_EX|LOCK_NB`），并发会立即失败。所以钩子层用一把全局 `flock`，让所有 mine 任务串行排队，互不抢锁。
+- **全局 flock 排队（可降级）** —— 多个项目、多个会话可能同时触发 SessionEnd。mempalace 在 palace 级别强制单写者（`mine_palace_<key>.lock`，非阻塞 `LOCK_EX|LOCK_NB`），并发会立即失败。所以钩子层用一把全局 `flock`，让所有 mine 任务串行排队，互不抢锁。**Windows + Git Bash 默认没装 `flock`**：钩子启动时探测，找不到就退化到无锁执行 + 在日志里打警告。强制要求 `flock` 可用的部署可设 `MEMPALACE_HOOK_REQUIRE_FLOCK=true`，找不到则整个钩子放弃。
 - **convos → files 串行** —— 单个子 shell 内先跑 convos mine（会话归档），再跑 files mine（项目代码/文档）。避免两个 mempalace 进程争同一把 palace 锁。
 - **每项目 files mine 每天一次** —— 用状态文件 `$STATE_DIR/proj_<sha256(cwd)[:16]>` 的 mtime 判断；同一天已成功过就跳过，失败时不刷新状态文件以便下次重试。首次见到的项目自动全量。
 - **cwd 不靠 slug 反解** —— `~/.claude/projects/` 下的目录名（slug）把 `\`/`/`/`:` 全都替换成了 `-`，无法可靠反解。改成从 transcript jsonl 第一条带 `cwd` 字段的记录里读真实路径。
@@ -112,6 +112,8 @@ tail -20 "$MEMPALACE_BACKUP_ROOT/backup.log"
 | `MEMPALACE_HOOK_TIMEOUT` | `1800` | 等全局锁的超时秒数（30 分钟） |
 | `MEMPAL_PYTHON_BIN` | `python3` | Python 解释器路径 |
 | `MEMPALACE_HOOK_AUTOINIT` | `true` | 首见项目（无 yaml + 无状态文件）时是否自动跑 `mempalace init --yes --no-llm`。设 `false`/`0`/`no` 关闭。失败不阻塞 files mine（mempalace 自带降级到 general room） |
+| `MEMPALACE_HOOK_VERBOSE` | `false` | 详细日志开关。设 `true`/`1`/`yes` 时每步记录开始/结束/耗时/退出码，便于排查问题 |
+| `MEMPALACE_HOOK_REQUIRE_FLOCK` | `false` | 是否强制要求 `flock` 可用。Windows + Git Bash 通常没装 `flock`，默认 `false` 时会退化到无全局锁的串行执行（依赖 mempalace 内部 palace 锁防双写，但并发会话仍可能丢任务）。设 `true` 强制要求 `flock`，找不到时整个钩子放弃执行，避免无锁退化的不确定性 |
 
 `mempalace-precompact-hook.sh`：
 

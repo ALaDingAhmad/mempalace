@@ -29,6 +29,13 @@
 #     成功失败都不阻塞 files mine（mempalace 自带降级到 general room）。
 #     注意：会在项目根目录写 mempalace.yaml/entities.json/signature 三个文件。
 #     不希望污染项目仓库的用户应自行加入 .gitignore，或设此变量为 false。
+#   MEMPALACE_HOOK_VERBOSE  详细日志开关 默认 false（值 true/1/yes 开）
+#     开启后每一步打印开始/结束/耗时/退出码，便于排查问题。
+#   MEMPALACE_HOOK_REQUIRE_FLOCK 是否强制要求 flock 默认 false
+#     某些 Windows + Git Bash 环境没装 flock。默认 false 时：找不到 flock
+#     就退化到无全局锁的串行执行（mempalace 内部 palace 锁仍会防止双写
+#     冲突，但并发会话有任务被丢的可能）。设 true 强制要求 flock，
+#     找不到时整个钩子放弃执行（避免无锁退化的不确定性）。
 
 set -u
 
@@ -37,6 +44,19 @@ STATE_DIR="${MEMPALACE_HOOK_STATE:-$HOME/.mempalace/hook_state}"
 LOG="${MEMPALACE_HOOK_LOG:-$STATE_DIR/hook.log}"
 HOOK_LOCK="${MEMPALACE_HOOK_LOCK:-$STATE_DIR/hook_mine.lock}"
 LOCK_TIMEOUT="${MEMPALACE_HOOK_TIMEOUT:-1800}"
+VERBOSE="${MEMPALACE_HOOK_VERBOSE:-false}"
+REQUIRE_FLOCK="${MEMPALACE_HOOK_REQUIRE_FLOCK:-false}"
+
+# 布尔值规范化
+case "$VERBOSE" in true|1|yes) VERBOSE=true;; *) VERBOSE=false;; esac
+case "$REQUIRE_FLOCK" in true|1|yes) REQUIRE_FLOCK=true;; *) REQUIRE_FLOCK=false;; esac
+
+# flock 可用性探测（Windows Git Bash 通常没装）
+if command -v flock >/dev/null 2>&1; then
+    HAVE_FLOCK=true
+else
+    HAVE_FLOCK=false
+fi
 
 mkdir -p "$STATE_DIR"
 
@@ -94,27 +114,50 @@ print(hashlib.sha256(sys.argv[1].encode('utf-8')).hexdigest()[:16])
 fi
 
 log "钩子触发 transcript=$TRANSCRIPT cwd=${CWD:-<无>}"
+$VERBOSE && log "环境 PY=$PY VERBOSE=$VERBOSE HAVE_FLOCK=$HAVE_FLOCK REQUIRE_FLOCK=$REQUIRE_FLOCK STATE_DIR=$STATE_DIR"
+
+# 强制要求 flock 但没装 → 拒绝执行（避免静默无锁）
+if [ "$REQUIRE_FLOCK" = "true" ] && [ "$HAVE_FLOCK" = "false" ]; then
+    log "错误 flock 命令不可用且 MEMPALACE_HOOK_REQUIRE_FLOCK=true，整个钩子放弃执行"
+    exit 0
+fi
 
 # 单一后台子 shell：抢全局锁 → 串行 convos → files
 # 用 nohup + bash -c 让父进程立即返回，所有等待全部在后台发生
 nohup bash -c "
     LOG_BG='$LOG'
+    VERBOSE_BG='$VERBOSE'
+    HAVE_FLOCK_BG='$HAVE_FLOCK'
     log_bg() { echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] \$*\" >> \"\$LOG_BG\"; }
+    log_v()  { [ \"\$VERBOSE_BG\" = 'true' ] && log_bg \"[VERBOSE] \$*\"; }
 
     # 全局排队锁：所有项目所有会话共用一把
-    exec 9>'$HOOK_LOCK'
-    if ! flock -w $LOCK_TIMEOUT 9; then
-        log_bg '等待全局 hook 锁超时（$LOCK_TIMEOUT 秒），跳过本次 mine'
-        exit 0
+    # flock 不可用时退化到无锁串行执行（mempalace 内部 palace 锁仍存在，
+    # 但是 LOCK_NB 非阻塞型，并发会话有任务被丢的概率）。
+    if [ \"\$HAVE_FLOCK_BG\" = 'true' ]; then
+        exec 9>'$HOOK_LOCK'
+        LOCK_T0=\$(date +%s)
+        if flock -w $LOCK_TIMEOUT 9; then
+            LOCK_T1=\$(date +%s)
+            log_bg \"拿到全局 hook 锁（等待 \$((LOCK_T1-LOCK_T0))s）\"
+        else
+            log_bg \"等待全局 hook 锁超时（$LOCK_TIMEOUT 秒），跳过本次 mine\"
+            exit 0
+        fi
+    else
+        log_bg \"警告 flock 不可用，退化到无锁执行（依赖 mempalace 内部 palace 锁）\"
     fi
-    log_bg '拿到全局 hook 锁，开始 mine'
 
     # 1) convos mine（无条件）
-    log_bg 'convos mine 启动 dir=$TRANSCRIPT_DIR'
-    if $PY -m mempalace mine '$TRANSCRIPT_DIR' --mode convos --extract general >> \"\$LOG_BG\" 2>&1; then
-        log_bg 'convos mine 完成'
+    log_bg \"convos mine 启动 dir=$TRANSCRIPT_DIR\"
+    CV_T0=\$(date +%s)
+    $PY -m mempalace mine '$TRANSCRIPT_DIR' --mode convos --extract general >> \"\$LOG_BG\" 2>&1
+    CV_RC=\$?
+    CV_T1=\$(date +%s)
+    if [ \$CV_RC -eq 0 ]; then
+        log_bg \"convos mine 完成 耗时=\$((CV_T1-CV_T0))s\"
     else
-        log_bg 'convos mine 失败'
+        log_bg \"convos mine 失败 exit=\$CV_RC 耗时=\$((CV_T1-CV_T0))s\"
     fi
 
     # 2) files mine（每项目每天一次）
@@ -153,22 +196,36 @@ nohup bash -c "
        && [ ! -f \"\$MSYS_CWD_BG/mempal.yaml\" ] \\
        && [ ! -f \"\$STATE_FILE_BG\" ]; then
         log_bg \"首见该项目，尝试 auto-init cwd=\$CWD_BG\"
-        if $PY -m mempalace init \"\$CWD_BG\" --yes --no-llm >> \"\$LOG_BG\" 2>&1; then
-            log_bg 'auto-init 成功'
+        IN_T0=\$(date +%s)
+        $PY -m mempalace init \"\$CWD_BG\" --yes --no-llm >> \"\$LOG_BG\" 2>&1
+        IN_RC=\$?
+        IN_T1=\$(date +%s)
+        if [ \$IN_RC -eq 0 ]; then
+            log_bg \"auto-init 成功 耗时=\$((IN_T1-IN_T0))s\"
         else
-            log_bg 'auto-init 失败，files mine 仍会继续（mempalace 降级到 general room）'
+            log_bg \"auto-init 失败 exit=\$IN_RC 耗时=\$((IN_T1-IN_T0))s 不阻塞 files mine（mempalace 降级到 general room）\"
         fi
+    else
+        log_v \"auto-init 跳过 (autoinit=\$AUTOINIT_BG, yaml=\$([ -f \"\$MSYS_CWD_BG/mempalace.yaml\" ] && echo yes || echo no), state=\$([ -f \"\$STATE_FILE_BG\" ] && echo yes || echo no))\"
     fi
 
     log_bg \"files mine 启动 cwd=\$CWD_BG\"
-    if $PY -m mempalace mine \"\$CWD_BG\" --mode projects >> \"\$LOG_BG\" 2>&1; then
+    FM_T0=\$(date +%s)
+    $PY -m mempalace mine \"\$CWD_BG\" --mode projects >> \"\$LOG_BG\" 2>&1
+    FM_RC=\$?
+    FM_T1=\$(date +%s)
+    if [ \$FM_RC -eq 0 ]; then
         touch \"\$STATE_FILE_BG\"
-        log_bg \"files mine 完成 cwd=\$CWD_BG\"
+        log_bg \"files mine 完成 cwd=\$CWD_BG 耗时=\$((FM_T1-FM_T0))s\"
     else
-        log_bg \"files mine 失败 cwd=\$CWD_BG 状态文件未刷新，下次会话将重试\"
+        log_bg \"files mine 失败 cwd=\$CWD_BG exit=\$FM_RC 耗时=\$((FM_T1-FM_T0))s 状态文件未刷新 下次会话将重试\"
     fi
 " >> "$LOG" 2>&1 &
 
-log "后台 mine 进程 pid=$! 等待全局锁"
+if [ "$HAVE_FLOCK" = "true" ]; then
+    log "后台 mine 进程 pid=$! 等待全局锁"
+else
+    log "后台 mine 进程 pid=$! 直接执行（flock 不可用，无全局锁）"
+fi
 
 exit 0
