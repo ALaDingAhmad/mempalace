@@ -30,6 +30,22 @@ vanilla mempalace 在实际用起来有三个盲区：
 - **convos → files 串行** —— 单个子 shell 内先跑 convos mine（会话归档），再跑 files mine（项目代码/文档）。避免两个 mempalace 进程争同一把 palace 锁。
 - **每项目 files mine 每天一次** —— 用状态文件 `$STATE_DIR/proj_<sha256(cwd)[:16]>` 的 mtime 判断；同一天已成功过就跳过，失败时不刷新状态文件以便下次重试。首次见到的项目自动全量。
 - **cwd 不靠 slug 反解** —— `~/.claude/projects/` 下的目录名（slug）把 `\`/`/`/`:` 全都替换成了 `-`，无法可靠反解。改成从 transcript jsonl 第一条带 `cwd` 字段的记录里读真实路径。
+- **首见项目 auto-init**（`MEMPALACE_HOOK_AUTOINIT=true`，默认开）—— 状态文件不存在且项目目录无 `mempalace.yaml`/`mempal.yaml` 时，自动跑 `mempalace init --yes --no-llm` 生成基本配置，让 files mine 能按 room 分组。**会在项目根目录写 `mempalace.yaml`、`mempalace.entities.json`、`mempalace.signature` 三个文件**，不希望污染项目仓库的话请加进 `.gitignore`，或者把 `MEMPALACE_HOOK_AUTOINIT` 设为 `false` 关掉。init 失败不阻塞 files mine —— mempalace 会降级到单一 `general` room。
+
+## 碎片 wing 清理
+
+早期版本的钩子 / 旧的 init 行为会把整个 cwd（含盘符 + 路径分隔符）展平进 wing 名，产生 `d__aiproject_xxx` / `f__wslshare_xxx` 这种碎片 wing。当前钩子 + 当前 mempalace 已经只用项目目录 `.name` 做 wing，不会再产生碎片，但历史遗留可以用 `personal/scripts/delete_orphan_wings.py` 清掉：
+
+```bash
+# 1. 改脚本顶部的 ORPHAN_WINGS 列表为你机器上要删的 wing 名
+# 2. 先 dry-run 看会删什么
+python3 personal/scripts/delete_orphan_wings.py --dry-run
+
+# 3. 确认无误后真删
+python3 personal/scripts/delete_orphan_wings.py --yes
+```
+
+运行前**强烈建议先跑一次 `mempalace-backup.sh`**。
 
 ## 安装
 
@@ -95,6 +111,7 @@ tail -20 "$MEMPALACE_BACKUP_ROOT/backup.log"
 | `MEMPALACE_HOOK_LOCK` | `$MEMPALACE_HOOK_STATE/hook_mine.lock` | 全局排队锁文件 |
 | `MEMPALACE_HOOK_TIMEOUT` | `1800` | 等全局锁的超时秒数（30 分钟） |
 | `MEMPAL_PYTHON_BIN` | `python3` | Python 解释器路径 |
+| `MEMPALACE_HOOK_AUTOINIT` | `true` | 首见项目（无 yaml + 无状态文件）时是否自动跑 `mempalace init --yes --no-llm`。设 `false`/`0`/`no` 关闭。失败不阻塞 files mine（mempalace 自带降级到 general room） |
 
 `mempalace-precompact-hook.sh`：
 

@@ -23,6 +23,12 @@
 #   MEMPALACE_HOOK_LOCK    全局排队锁  默认 $MEMPALACE_HOOK_STATE/hook_mine.lock
 #   MEMPALACE_HOOK_TIMEOUT 等锁超时秒  默认 1800（30 分钟）
 #   MEMPAL_PYTHON_BIN      Python 可执行 默认 python3
+#   MEMPALACE_HOOK_AUTOINIT 首见项目时是否自动 init 默认 true（值 false/0/no 关）
+#     首次见到某项目且目录无 mempalace.yaml/mempal.yaml 时，
+#     钩子会尝试 `mempalace init --yes --no-llm` 生成基本配置。
+#     成功失败都不阻塞 files mine（mempalace 自带降级到 general room）。
+#     注意：会在项目根目录写 mempalace.yaml/entities.json/signature 三个文件。
+#     不希望污染项目仓库的用户应自行加入 .gitignore，或设此变量为 false。
 
 set -u
 
@@ -134,6 +140,23 @@ nohup bash -c "
         if [ \"\$STATE_DATE\" = \"\$TODAY\" ]; then
             log_bg \"files mine 跳过 原因=今日已完成 (\$CWD_BG)\"
             exit 0
+        fi
+    fi
+
+    # 首见该项目 + yaml 缺失 → 尝试 auto-init（开关可关）
+    # 状态文件不存在意味着 mempalace 这边也没记录过该项目，是真正的首次。
+    # 失败不阻塞下面的 files mine（mempalace 会降级到 general room）。
+    AUTOINIT_BG='${MEMPALACE_HOOK_AUTOINIT:-true}'
+    case \"\$AUTOINIT_BG\" in false|0|no) AUTOINIT_BG='false';; *) AUTOINIT_BG='true';; esac
+    if [ \"\$AUTOINIT_BG\" = 'true' ] \\
+       && [ ! -f \"\$MSYS_CWD_BG/mempalace.yaml\" ] \\
+       && [ ! -f \"\$MSYS_CWD_BG/mempal.yaml\" ] \\
+       && [ ! -f \"\$STATE_FILE_BG\" ]; then
+        log_bg \"首见该项目，尝试 auto-init cwd=\$CWD_BG\"
+        if $PY -m mempalace init \"\$CWD_BG\" --yes --no-llm >> \"\$LOG_BG\" 2>&1; then
+            log_bg 'auto-init 成功'
+        else
+            log_bg 'auto-init 失败，files mine 仍会继续（mempalace 降级到 general room）'
         fi
     fi
 
